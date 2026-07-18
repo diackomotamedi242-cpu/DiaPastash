@@ -10,7 +10,7 @@ const __dirname = path.dirname(__filename);
 
 // https://vite.dev/config/
 export default defineConfig({
-  // اضافه کردن این خط برای گیت‌هاب پیجز حیاتی است
+  // 
   base: "/DiaPastash/", 
   
   plugins: [react(), tailwindcss(), viteSingleFile()],
