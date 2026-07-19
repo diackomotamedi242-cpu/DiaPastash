@@ -1,10 +1,17 @@
 /**
- * AppContext — the StateManager + wiring layer.
+ * AppContext — the StateManager + wiring layer (Backend presentation client).
  * ---------------------------------------------------------------------------
- * Holds every piece of application state (auth, settings, language, MQTT
- * status, system state, modules, event log) and bridges the headless
- * MqttService to React. Parsing of inbound device JSON into module/log state
- * lives here so the UI stays declarative.
+ * • Authentication is delegated ENTIRELY to the backend. This layer never
+ *   stores, reads or compares passwords. It only calls /auth/* and trusts the
+ *   HttpOnly cookie the backend sets (sent automatically via credentials:include).
+ * • Real-time state arrives over Socket.IO (system:state, security:event).
+ * • Commands go through POST /system/commands; the UI is updated only after the
+ *   backend confirms (no optimistic updates).
+ *
+ * A clearly-labelled local "Demo / Preview" mode exists ONLY so the UI can be
+ * previewed without a live backend. It never performs or bypasses real auth and
+ * touches no session. Remove `enterDemo`/DEMO handling for a strict production
+ * build if you prefer.
  */
 import {
   createContext,
@@ -16,24 +23,24 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { mqttService } from "../services/MqttService";
+import { api, ApiError, setApiTraceSink } from "../services/ApiClient";
+import { socketService } from "../services/SocketService";
+import { applyAppIcon } from "../pwa";
 import {
-  AUTH,
+  ACCENTS,
   MODULE_REGISTRY,
   STORAGE_KEYS,
-  buildBrokerUrl,
   defaultSettings,
   findModuleDef,
 } from "../config";
 import { translations, type Lang, type TranslationKey } from "../i18n/translations";
-import { applyAppIcon } from "../pwa";
 import type {
-  DeviceEvent,
   LogEntry,
   ModuleState,
-  MqttStatus,
+  SecurityEvent,
   Settings,
   Severity,
+  SystemSnapshot,
   SystemState,
   TraceDir,
   TraceEntry,
@@ -49,12 +56,6 @@ function uid(): string {
   }
 }
 
-/** Random RFID-style UID for demo events. */
-function randUid(): string {
-  const b = () => Math.floor(Math.random() * 256).toString(16).padStart(2, "0").toUpperCase();
-  return `${b()}:${b()}:${b()}:${b()}`;
-}
-
 function loadJSON<T>(key: string, fallback: T): T {
   try {
     const raw = localStorage.getItem(key);
@@ -64,8 +65,13 @@ function loadJSON<T>(key: string, fallback: T): T {
   }
 }
 
+function randUid(): string {
+  const b = () => Math.floor(Math.random() * 256).toString(16).padStart(2, "0").toUpperCase();
+  return `${b()}:${b()}:${b()}:${b()}`;
+}
+
 /** Map any severity-ish string (or event name) to our 4 buckets. */
-export function normalizeSeverity(sev?: string, event?: string): Severity {
+function normalizeSeverity(sev?: string, event?: string): Severity {
   const s = String(sev ?? "").toLowerCase();
   if (s) {
     if (/alarm|critical|danger|alert/.test(s)) return "alarm";
@@ -82,7 +88,7 @@ export function normalizeSeverity(sev?: string, event?: string): Severity {
   return "info";
 }
 
-function normalizeSystemState(v?: string): SystemState {
+function normalizeSystemState(v?: unknown): SystemState {
   const s = String(v ?? "").toLowerCase();
   if (s.includes("disarm")) return "disarmed";
   if (s.includes("alarm") || s.includes("trigger")) return "alarm";
@@ -90,7 +96,7 @@ function normalizeSystemState(v?: string): SystemState {
   return "unknown";
 }
 
-function computeValue(type: ModuleState["type"], evt: DeviceEvent): string | undefined {
+function computeValue(type: ModuleState["type"], evt: SecurityEvent): string | undefined {
   switch (type) {
     case "ultrasonic":
       return evt.distance != null ? String(evt.distance) : evt.payload || undefined;
@@ -101,12 +107,66 @@ function computeValue(type: ModuleState["type"], evt: DeviceEvent): string | und
   }
 }
 
-function buildSummary(evt: DeviceEvent, topic: string): string {
-  const head = evt.event || evt.state || topic.split("/").pop() || "message";
+function buildSummary(evt: SecurityEvent): string {
+  const head = evt.event || (evt.module ? "event" : "message");
   return evt.module ? `[${evt.module}] ${head}` : head;
 }
 
+/**
+ * Best-effort scalar extraction from a backend status string, so distance/UID
+ * values get the emphasis styling on the card. Falls back to undefined so the
+ * plain message text is shown instead.
+ */
+function extractValueFromMessage(type: ModuleState["type"], message?: string): string | undefined {
+  if (!message) return undefined;
+  const s = String(message).trim();
+  if (type === "ultrasonic") {
+    const m = /(-?\d+(?:\.\d+)?)/.exec(s);
+    return m ? m[1] : undefined;
+  }
+  if (type === "rfid") {
+    if (/^[0-9a-fA-F]{2}([: -]?[0-9a-fA-F]{2}){2,}/.test(s)) return s;
+  }
+  return undefined;
+}
+
+function initialModules(): Record<string, ModuleState> {
+  const init: Record<string, ModuleState> = {};
+  for (const m of MODULE_REGISTRY) init[m.id] = { id: m.id, type: m.type, severity: "info" };
+  return init;
+}
+
+/** Sample module snapshot used only in local Demo/Preview mode (never real data). */
+function demoModules(): Record<string, ModuleState> {
+  const now = Date.now();
+  return {
+    M01: { id: "M01", type: "motion", severity: "ok", message: "Idle · no motion", updatedAt: now },
+    U01: { id: "U01", type: "ultrasonic", severity: "ok", message: "Clear · 118cm", value: "118", updatedAt: now },
+    S01: { id: "S01", type: "laser", severity: "ok", message: "Beam intact", updatedAt: now },
+    R01: { id: "R01", type: "rfid", severity: "ok", message: "Ready · awaiting card", updatedAt: now },
+  };
+}
+
+const DEMO_SYSTEM: SystemSnapshot = {
+  securityState: "disarmed",
+  deviceOnline: true,
+  backendOnline: true,
+  demo: true,
+};
+
+const OFFLINE_SYSTEM: SystemSnapshot = {
+  securityState: "unknown",
+  deviceOnline: false,
+  backendOnline: false,
+  demo: false,
+};
+
 /* ---------------------------------------------------------------- context */
+
+interface LoginResult {
+  ok: boolean;
+  error?: TranslationKey;
+}
 
 interface AppContextValue {
   // i18n
@@ -116,32 +176,36 @@ interface AppContextValue {
   toggleLang: () => void;
   t: (key: TranslationKey) => string;
 
-  // auth
+  // auth (backend-driven)
   authed: boolean;
-  login: (u: string, p: string) => boolean;
+  authChecking: boolean;
+  login: (u: string, p: string) => Promise<LoginResult>;
   logout: () => void;
+  enterDemo: () => void;
+  demo: boolean;
 
-  // settings
+  // settings (preferences only)
   settings: Settings;
   saveSettings: (s: Settings) => void;
-  resetSettings: () => void;
 
-  // mqtt
-  mqttStatus: MqttStatus;
-  lastError: string;
-  connect: () => void;
-  disconnect: () => void;
+  // system / connection
+  system: SystemSnapshot;
+  refreshSystemState: () => Promise<void>;
 
   // domain state
-  systemState: SystemState;
   modules: ModuleState[];
   logs: LogEntry[];
   traces: TraceEntry[];
   traceStats: { tx: number; rx: number; bytes: number };
-  sendCommand: (cmd: "arm" | "disarm" | "silence") => boolean;
-  injectTestEvent: () => void;
+  pendingCommand: "arm" | "disarm" | "silence" | null;
+  sendCommand: (cmd: "arm" | "disarm" | "silence") => Promise<void>;
+  injectDemoEvent: () => void;
   clearLogs: () => void;
   clearTraces: () => void;
+
+  // notifications
+  enableNotifications: () => Promise<void>;
+  notificationPermission: NotificationPermission | "unsupported";
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -154,43 +218,33 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return stored === "en" || stored === "fa" ? stored : "fa";
   });
 
-  const [settings, setSettings] = useState<Settings>(() => {
-    const loaded = loadJSON<Settings>(STORAGE_KEYS.settings, defaultSettings());
-    // ensure topic shape is complete (forward-compat)
-    return { ...defaultSettings(), ...loaded, topics: { ...defaultSettings().topics, ...loaded.topics } };
-  });
-
-  const [authed, setAuthed] = useState<boolean>(
-    () => localStorage.getItem(STORAGE_KEYS.auth) === "1",
+  const [settings, setSettings] = useState<Settings>(() =>
+    loadJSON<Settings>(STORAGE_KEYS.settings, defaultSettings()),
   );
 
-  const [mqttStatus, setMqttStatus] = useState<MqttStatus>("disconnected");
-  const [lastError, setLastError] = useState("");
+  const [authed, setAuthed] = useState(false);
+  const [authChecking, setAuthChecking] = useState(true);
+  const [demo, setDemo] = useState(false);
 
-  const [systemState, setSystemState] = useState<SystemState>("unknown");
-  const [modulesMap, setModulesMap] = useState<Record<string, ModuleState>>(() => {
-    const init: Record<string, ModuleState> = {};
-    for (const m of MODULE_REGISTRY) {
-      init[m.id] = { id: m.id, type: m.type, severity: "info" };
-    }
-    return init;
-  });
+  const [system, setSystem] = useState<SystemSnapshot>(OFFLINE_SYSTEM);
+  const [modulesMap, setModulesMap] = useState<Record<string, ModuleState>>(initialModules);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [traces, setTraces] = useState<TraceEntry[]>([]);
+  const [pendingCommand, setPendingCommand] = useState<"arm" | "disarm" | "silence" | null>(null);
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | "unsupported">(
+    typeof Notification !== "undefined" ? Notification.permission : "unsupported",
+  );
 
-  const pushTrace = useCallback((dir: TraceDir, kind: string, data?: Partial<TraceEntry>) => {
-    setTraces((prev) => {
-      const entry: TraceEntry = { id: uid(), ts: Date.now(), dir, kind, ...data };
-      const next = [...prev, entry];
-      return next.length > 300 ? next.slice(next.length - 300) : next;
-    });
-  }, []);
-
-  // Keep a live ref so the (once-bound) MQTT handler always reads fresh settings.
+  // Live refs so the once-bound socket handlers always read fresh values.
   const settingsRef = useRef(settings);
   useEffect(() => {
     settingsRef.current = settings;
   }, [settings]);
+  const demoRef = useRef(demo);
+  useEffect(() => {
+    demoRef.current = demo;
+  }, [demo]);
+  const pendingRef = useRef(pendingCommand);
 
   const t = useCallback(
     (key: TranslationKey) => translations[lang][key] ?? translations.en[key] ?? key,
@@ -205,54 +259,50 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [lang]);
 
   const setLang = useCallback((l: Lang) => setLangState(l), []);
-  const toggleLang = useCallback(
-    () => setLangState((p) => (p === "fa" ? "en" : "fa")),
-    [],
-  );
+  const toggleLang = useCallback(() => setLangState((p) => (p === "fa" ? "en" : "fa")), []);
 
-  /* keep the PWA icon / favicon in sync with the configured app icon */
+  /* ---- accent theming (user preference) ---- */
+  useEffect(() => {
+    const a = ACCENTS.find((x) => x.id === settings.themeAccent) ?? ACCENTS[0];
+    document.documentElement.style.setProperty("--accent", a.color);
+    document.documentElement.style.setProperty("--accent-rgb", a.rgb);
+  }, [settings.themeAccent]);
+
+  /* ---- keep PWA icon / favicon synced to the configured icon ---- */
   useEffect(() => {
     applyAppIcon(settings.appIconUrl);
   }, [settings.appIconUrl]);
 
-  /* ---- inbound parsing (StateManager logic) ---- */
-  const handleIncoming = useCallback((topic: string, raw: string) => {
-    const topics = settingsRef.current.topics;
-    let evt: DeviceEvent;
-    try {
-      evt = JSON.parse(raw) as DeviceEvent;
-    } catch {
-      evt = { event: raw, payload: raw };
-    }
-
-    let severity = normalizeSeverity(
-      typeof evt.severity === "string" ? evt.severity : undefined,
-      evt.event,
-    );
-
-    if (topic === topics.state) {
-      const st = typeof evt.state === "string" ? evt.state : raw;
-      setSystemState(normalizeSystemState(st));
-      severity = "info";
-    } else if (topic === topics.alarm) {
-      severity = severity === "info" ? "alarm" : severity;
-      if (severity === "alarm") setSystemState("alarm");
-      applyModule(evt, severity);
-    } else if (topic === topics.sensor) {
-      applyModule(evt, severity);
-    } else if (topic === topics.rfid) {
-      applyModule(evt, severity === "info" ? "ok" : severity);
-    }
-    // topics.system & unknown → logged only
-
-    pushLog({ topic, evt, severity });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  /* ---- tracing (shared by ApiClient + SocketService) ---- */
+  const pushTrace = useCallback((dir: TraceDir, kind: string, data?: Partial<TraceEntry>) => {
+    setTraces((prev) => {
+      const next = [...prev, { id: uid(), ts: Date.now(), dir, kind, ...data }];
+      return next.length > 300 ? next.slice(next.length - 300) : next;
+    });
   }, []);
 
-  function applyModule(evt: DeviceEvent, severity: Severity) {
+  /* ---- domain mutations ---- */
+  const pushLog = useCallback((args: {
+    topic: string;
+    evt: SecurityEvent;
+    severity: Severity;
+    outbound?: boolean;
+    summary?: string;
+  }) => {
+    const { topic, evt, severity, outbound, summary } = args;
+    setLogs((prev) =>
+      [
+        { id: uid(), timestamp: Date.now(), topic, event: evt, severity, outbound, summary: summary ?? buildSummary(evt) },
+        ...prev,
+      ].slice(0, 250),
+    );
+  }, []);
+
+  const applyModule = useCallback((evt: SecurityEvent, severity: Severity) => {
     const def = findModuleDef(evt.module as string);
     if (!def) return; // unknown module — still logged, no card
     const value = computeValue(def.type, evt);
+    const message = typeof evt.message === "string" ? evt.message : evt.payload;
     setModulesMap((prev) => ({
       ...prev,
       [def.id]: {
@@ -260,178 +310,283 @@ export function AppProvider({ children }: { children: ReactNode }) {
         type: def.type,
         severity,
         value,
+        message,
         event: evt.event,
         updatedAt: Date.now(),
       },
     }));
-  }
+  }, []);
 
-  function pushLog(args: {
-    topic: string;
-    evt: DeviceEvent;
-    severity: Severity;
-    outbound?: boolean;
-    summary?: string;
-  }) {
-    const { topic, evt, severity, outbound, summary } = args;
-    setLogs((prev) =>
-      [
-        {
-          id: uid(),
-          timestamp: Date.now(),
-          topic,
-          event: evt,
+  /**
+   * `modules:sync` — received right after connecting. Hydrates EVERY module
+   * card with the backend's last-known state so the panel is never blank.
+   * Payload shape: { "M01": { status, message }, "U01": {...}, ... }
+   */
+  const handleModulesSync = useCallback((data: unknown) => {
+    const d = (data ?? {}) as Record<string, { status?: string; message?: string }>;
+    setModulesMap((prev) => {
+      const next = { ...prev };
+      const now = Date.now();
+      let touched = false;
+      for (const m of MODULE_REGISTRY) {
+        const entry = d[m.id] ?? d[m.id.toLowerCase()];
+        if (!entry) continue;
+        touched = true;
+        const severity = normalizeSeverity(entry.status, undefined);
+        const value = extractValueFromMessage(m.type, entry.message);
+        next[m.id] = {
+          id: m.id,
+          type: m.type,
           severity,
-          outbound,
-          summary: summary ?? buildSummary(evt, topic),
-        },
-        ...prev,
-      ].slice(0, 250),
-    );
-  }
-
-  /* ---- MQTT wiring (bind once) ---- */
-  useEffect(() => {
-    mqttService.onStatus = (status, detail) => {
-      setMqttStatus(status);
-      if (status === "error") setLastError(detail || "connection error");
-    };
-    mqttService.onMessage = (topic, payload) => handleIncoming(topic, payload);
-    mqttService.onTrace = (entry) => setTraces((prev) => (prev.length > 300 ? [...prev.slice(-299), entry] : [...prev, entry]));
-    return () => {
-      mqttService.disconnect();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+          value,
+          message: entry.message,
+          updatedAt: now,
+        };
+      }
+      return touched ? next : prev;
+    });
   }, []);
 
-  const subscriptionTopics = useCallback((s: Settings) => {
-    const ts = s.topics;
-    return [ts.state, ts.alarm, ts.sensor, ts.rfid, ts.system].filter(Boolean);
+  /* ---- inbound socket handlers ---- */
+  const handleSystemState = useCallback((data: unknown) => {
+    const d = (data ?? {}) as Record<string, unknown>;
+    setSystem((prev) => ({
+      securityState: normalizeSystemState(d.securityState ?? d.state) || prev.securityState,
+      deviceOnline: typeof d.deviceOnline === "boolean" ? d.deviceOnline : prev.deviceOnline,
+      backendOnline: true,
+      demo: prev.demo,
+      lastSync: Date.now(),
+    }));
   }, []);
 
-  const connect = useCallback(() => {
-    const s = settingsRef.current;
-    mqttService.connect(buildBrokerUrl(s), subscriptionTopics(s));
-  }, [subscriptionTopics]);
-
-  const disconnect = useCallback(() => mqttService.disconnect(), []);
-
-  /* auto-(re)connect after login */
-  useEffect(() => {
-    if (authed) connect();
-    else mqttService.disconnect();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authed]);
-
-  /* ---- commands ---- */
-  const sendCommand = useCallback((cmd: "arm" | "disarm" | "silence") => {
-    const s = settingsRef.current;
-    const topic =
-      cmd === "arm" ? s.topics.cmdArm : cmd === "disarm" ? s.topics.cmdDisarm : s.topics.cmdSilence;
-    const ok = mqttService.publish(topic, "");
-    if (ok) {
-      if (cmd === "arm") setSystemState("armed");
-      else if (cmd === "disarm") setSystemState("disarmed");
-      else setSystemState((prev) => (prev === "alarm" ? "armed" : prev));
-      pushLog({
-        topic,
-        evt: { event: `cmd.${cmd}`, severity: "info", payload: "" },
-        severity: "info",
-        outbound: true,
-        summary: `→ cmd/${cmd}`,
-      });
-    } else {
-      // Offline: still reflect intent in the UI + tracer so the panel is demonstrable.
-      pushTrace("tx", "PUBLISH", { topic, payload: "", detail: "offline intent" });
-      pushLog({
-        topic,
-        evt: { event: `cmd.${cmd}`, severity: "info", payload: "" },
-        severity: "info",
-        outbound: true,
-        summary: `→ cmd/${cmd} (offline)`,
-      });
-    }
-    return ok;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  /* ---- settings persistence ---- */
-  const saveSettings = useCallback(
-    (next: Settings) => {
-      setSettings(next);
-      localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(next));
-      // reconnect with the new broker/topics immediately
-      mqttService.connect(buildBrokerUrl(next), subscriptionTopics(next));
+  const handleSecurityEvent = useCallback(
+    (data: unknown) => {
+      const evt = (data ?? {}) as SecurityEvent;
+      const severity = normalizeSeverity(
+        typeof evt.severity === "string" ? evt.severity : undefined,
+        evt.event,
+      );
+      applyModule(evt, severity);
+      pushLog({ topic: "security:event", evt, severity });
+      // Optional desktop notification for alarms.
+      if (
+        settingsRef.current.notifications &&
+        severity === "alarm" &&
+        typeof Notification !== "undefined" &&
+        Notification.permission === "granted"
+      ) {
+        try {
+          new Notification(`${evt.module ?? "DiaPastash"} · ${evt.event ?? "Alarm"}`);
+        } catch {
+          /* ignore */
+        }
+      }
     },
-    [subscriptionTopics],
+    [applyModule, pushLog],
   );
 
-  const resetSettings = useCallback(() => {
-    const fresh = defaultSettings();
-    setSettings(fresh);
-    localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(fresh));
-    mqttService.connect(buildBrokerUrl(fresh), subscriptionTopics(fresh));
-  }, [subscriptionTopics]);
+  /* ---- session probe on first load ---- */
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      setAuthChecking(true);
+      if (localStorage.getItem(STORAGE_KEYS.demo) === "1") {
+        setDemo(true);
+        setSystem(DEMO_SYSTEM);
+        setModulesMap(demoModules());
+        setAuthed(true);
+        setAuthChecking(false);
+        return;
+      }
+      try {
+        await api.me();
+        if (active) setAuthed(true);
+      } catch {
+        if (active) setAuthed(false);
+      } finally {
+        if (active) setAuthChecking(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
 
-  /* ---- auth ---- */
-  const login = useCallback((u: string, p: string) => {
-    if (u.trim() === AUTH.username && p === AUTH.password) {
-      setAuthed(true);
-      localStorage.setItem(STORAGE_KEYS.auth, "1");
-      return true;
+  /* ---- wire transports once authenticated (real mode only) ---- */
+  useEffect(() => {
+    if (!authed || demo) return;
+
+    socketService.onConn = (c) => setSystem((prev) => ({ ...prev, backendOnline: c }));
+    socketService.onSystemState = handleSystemState;
+    socketService.onModulesSync = handleModulesSync;
+    socketService.onSecurityEvent = handleSecurityEvent;
+    socketService.traceSink = pushTrace;
+    setApiTraceSink(pushTrace);
+
+    socketService.connect();
+    void refreshSystemState();
+
+    return () => {
+      socketService.disconnect();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authed, demo]);
+
+  /* ---- actions ---- */
+  const refreshSystemState = useCallback(async () => {
+    if (demoRef.current) return;
+    try {
+      const d = (await api.getSystemState()) as Record<string, unknown>;
+      setSystem((prev) => ({
+        securityState: normalizeSystemState(d.securityState ?? d.state) || prev.securityState,
+        deviceOnline: typeof d.deviceOnline === "boolean" ? d.deviceOnline : prev.deviceOnline,
+        backendOnline: true,
+        demo: prev.demo,
+        lastSync: Date.now(),
+      }));
+    } catch {
+      setSystem((prev) => ({ ...prev, backendOnline: false }));
     }
-    return false;
   }, []);
 
-  const logout = useCallback(() => {
+  const login = useCallback(
+    async (username: string, password: string): Promise<LoginResult> => {
+      try {
+        await api.login(username, password);
+        setDemo(false);
+        setAuthed(true);
+        return { ok: true };
+      } catch (e) {
+        const status = e instanceof ApiError ? e.status : 0;
+        const errorKey: TranslationKey = status === 0 ? "serverUnreachable" : "authError";
+        return { ok: false, error: errorKey };
+      }
+    },
+    [],
+  );
+
+  const logout = useCallback(async () => {
+    if (!demoRef.current) {
+      try {
+        await api.logout();
+      } catch {
+        /* best-effort */
+      }
+    }
+    localStorage.removeItem(STORAGE_KEYS.demo);
+    setDemo(false);
     setAuthed(false);
-    localStorage.removeItem(STORAGE_KEYS.auth);
-    mqttService.disconnect();
+    socketService.disconnect();
+    setSystem(OFFLINE_SYSTEM);
+    setModulesMap(initialModules());
+    setLogs([]);
   }, []);
 
-  const clearLogs = useCallback(() => setLogs([]), []);
+  const enterDemo = useCallback(() => {
+    localStorage.setItem(STORAGE_KEYS.demo, "1");
+    setDemo(true);
+    setSystem(DEMO_SYSTEM);
+    setModulesMap(demoModules());
+    setAuthed(true);
+  }, []);
 
-  /* ---- demo / diagnostics: inject a realistic device event ---- */
-  const injectTestEvent = useCallback(() => {
+  const sendCommand = useCallback(
+    async (cmd: "arm" | "disarm" | "silence") => {
+      if (pendingRef.current) return;
+      pendingRef.current = cmd;
+      setPendingCommand(cmd);
+
+      // Demo / preview path — simulate a backend confirmation locally.
+      if (demoRef.current) {
+        await new Promise((r) => setTimeout(r, 700));
+        setSystem((prev) => ({
+          ...prev,
+          securityState: cmd === "arm" ? "armed" : "disarmed",
+          lastSync: Date.now(),
+        }));
+        pushTrace("sys", "CMD_CONFIRM", { detail: `demo ${cmd}` });
+        pendingRef.current = null;
+        setPendingCommand(null);
+        return;
+      }
+
+      // Real path — wait for the backend to confirm, then refresh state.
+      try {
+        await api.sendCommand(cmd);
+        await refreshSystemState();
+        pushTrace("sys", "CMD_CONFIRM", { detail: cmd });
+      } catch (e) {
+        pushTrace("sys", "CMD_ERROR", { detail: e instanceof Error ? e.message : "error" });
+      } finally {
+        pendingRef.current = null;
+        setPendingCommand(null);
+      }
+    },
+    [pushTrace, refreshSystemState],
+  );
+
+  const injectDemoEvent = useCallback(() => {
     const scenarios: {
       module: string;
       event: string;
       severity: Severity;
-      tkey: "alarm" | "sensor" | "rfid";
       distance?: string;
       uid?: string;
     }[] = [
-      { module: "S01", event: "LaserBeamBroken", severity: "alarm", tkey: "alarm" },
-      { module: "S01", event: "LaserRestored", severity: "ok", tkey: "sensor" },
-      { module: "S02", event: "MotionDetected", severity: "alarm", tkey: "alarm" },
-      { module: "S02", event: "MotionClear", severity: "ok", tkey: "sensor" },
-      { module: "S03", event: "Proximity", severity: "warning", tkey: "sensor", distance: String(15 + Math.floor(Math.random() * 25)) },
-      { module: "S03", event: "Proximity", severity: "ok", tkey: "sensor", distance: String(80 + Math.floor(Math.random() * 120)) },
-      { module: "S04", event: "CardScanned", severity: "ok", tkey: "rfid", uid: randUid() },
+      { module: "S01", event: "LaserBeamBroken", severity: "alarm" },
+      { module: "S01", event: "LaserRestored", severity: "ok" },
+      { module: "M01", event: "MotionDetected", severity: "alarm" },
+      { module: "M01", event: "MotionClear", severity: "ok" },
+      { module: "U01", event: "Proximity", severity: "warning", distance: String(15 + Math.floor(Math.random() * 25)) },
+      { module: "U01", event: "Proximity", severity: "ok", distance: String(80 + Math.floor(Math.random() * 120)) },
+      { module: "R01", event: "CardScanned", severity: "ok", uid: randUid() },
     ];
     const s = scenarios[Math.floor(Math.random() * scenarios.length)];
-    const uptime = `${10 + Math.floor(Math.random() * 900)}s`;
-    const evt: DeviceEvent = {
+    const evt: SecurityEvent = {
       module: s.module,
       event: s.event,
       severity: s.severity,
       payload: s.uid ?? s.distance ?? "",
-      uptime,
+      uptime: `${10 + Math.floor(Math.random() * 900)}s`,
       distance: s.distance,
       uid: s.uid,
     };
-    const topic = settingsRef.current.topics[s.tkey];
     const payload = JSON.stringify(evt);
-    if (mqttService.connected) {
-      // Echoes back to us (we are subscribed) → real RX trace appears automatically.
-      mqttService.publish(topic, payload);
-    } else {
-      handleIncoming(topic, payload); // offline demo still animates the UI
-      pushTrace("rx", "MESSAGE", { topic, payload, detail: "simulated" }); // offline demo trace
-    }
-  }, [handleIncoming, pushTrace]);
+    pushTrace("rx", "security:event", { payload, detail: "simulated" });
+    handleSecurityEvent(evt);
+  }, [handleSecurityEvent, pushTrace]);
 
-  const modules = useMemo(() => MODULE_REGISTRY.map((m) => modulesMap[m.id]).filter(Boolean), [modulesMap]);
+  const clearLogs = useCallback(() => setLogs([]), []);
+  const clearTraces = useCallback(() => setTraces([]), []);
+
+  const enableNotifications = useCallback(async () => {
+    if (typeof Notification === "undefined") {
+      setNotificationPermission("unsupported");
+      return;
+    }
+    try {
+      const perm = await Notification.requestPermission();
+      setNotificationPermission(perm);
+      setSettings((prev) => {
+        const next = { ...prev, notifications: perm === "granted" };
+        localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(next));
+        return next;
+      });
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const saveSettings = useCallback((next: Settings) => {
+    setSettings(next);
+    localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(next));
+  }, []);
+
+  /* ---- derived ---- */
+  const modules = useMemo(
+    () => MODULE_REGISTRY.map((m) => modulesMap[m.id]).filter(Boolean),
+    [modulesMap],
+  );
 
   const traceStats = useMemo(() => {
     let tx = 0;
@@ -445,8 +600,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return { tx, rx, bytes };
   }, [traces]);
 
-  const clearTraces = useCallback(() => setTraces([]), []);
-
   const value: AppContextValue = {
     lang,
     dir: lang === "fa" ? "rtl" : "ltr",
@@ -454,24 +607,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
     toggleLang,
     t,
     authed,
+    authChecking,
     login,
     logout,
+    enterDemo,
+    demo,
     settings,
     saveSettings,
-    resetSettings,
-    mqttStatus,
-    lastError,
-    connect,
-    disconnect,
-    systemState,
+    system,
+    refreshSystemState,
     modules,
     logs,
     traces,
     traceStats,
+    pendingCommand,
     sendCommand,
-    injectTestEvent,
+    injectDemoEvent,
     clearLogs,
     clearTraces,
+    enableNotifications,
+    notificationPermission,
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

@@ -3,23 +3,20 @@ import { useApp } from "../context/AppContext";
 import { IconEye, IconEyeOff, IconLock, IconShield, IconUser } from "./Icons";
 
 export function Login() {
-  const { login, t, lang, toggleLang } = useApp();
+  const { login, enterDemo, t, lang, toggleLang } = useApp();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showPw, setShowPw] = useState(false);
-  const [error, setError] = useState(false);
+  const [errorKey, setErrorKey] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const onSubmit = (e: FormEvent) => {
+  const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setBusy(true);
-    setError(false);
-    // Tiny delay for the "authenticating" feedback.
-    setTimeout(() => {
-      const ok = login(username, password);
-      if (!ok) setError(true);
-      setBusy(false);
-    }, 450);
+    setErrorKey(null);
+    const res = await login(username, password);
+    if (!res.ok) setErrorKey(res.error ?? "authError");
+    setBusy(false);
   };
 
   return (
@@ -33,7 +30,7 @@ export function Login() {
           <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl border border-neon-green/40 bg-black/40 shadow-glow-green">
             <IconShield className="h-8 w-8 text-glow-green" />
           </div>
-          <h1 className="font-display text-4xl font-bold text-glow-blue animate-flicker">
+          <h1 className="font-brand text-3xl font-bold text-glow-blue animate-flicker">
             DIA<span className="text-glow-green">PASTASH</span>
           </h1>
           <p className="mt-2 font-tech text-xs uppercase text-cyan-200/60">{t("loginHint")}</p>
@@ -55,17 +52,10 @@ export function Login() {
             </button>
           </div>
 
-          {/* Username — no revealing placeholder, icon-prefixed */}
           <Field label={t("username")}>
-            <CredInput
-              value={username}
-              onChange={setUsername}
-              Icon={IconUser}
-              autoComplete="username"
-            />
+            <CredInput value={username} onChange={setUsername} Icon={IconUser} autoComplete="username" />
           </Field>
 
-          {/* Password — same shell, plus show/hide toggle */}
           <Field label={t("password")}>
             <CredInput
               value={password}
@@ -87,9 +77,9 @@ export function Login() {
             />
           </Field>
 
-          {error && (
+          {errorKey && (
             <p className="animate-pulse rounded-md border border-neon-red/40 bg-neon-red/5 px-3 py-2 text-center font-tech text-xs text-glow-red">
-              ⚠ {t("loginError")}
+              ⚠ {t(errorKey as "authError")}
             </p>
           )}
 
@@ -101,9 +91,15 @@ export function Login() {
             {busy ? t("loggingIn") : t("loginBtn")}
           </button>
 
-          <p className="pt-1 text-center font-tech text-[10px] uppercase text-cyan-200/30">
-            {t("poweredBy")}
-          </p>
+          <button
+            type="button"
+            onClick={enterDemo}
+            className="w-full text-center font-tech text-[10px] uppercase text-cyan-200/40 transition hover:text-glow-pink"
+          >
+            ◇ {t("enterDemo")}
+          </button>
+
+          <p className="pt-1 text-center font-tech text-[10px] uppercase text-cyan-200/30">{t("poweredBy")}</p>
         </form>
       </div>
     </div>

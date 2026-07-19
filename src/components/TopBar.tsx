@@ -14,7 +14,7 @@ export function TopBar() {
             <IconShield className="h-5 w-5 text-glow-green" />
           </div>
           <div className="leading-none">
-            <div className="font-display text-lg font-bold tracking-[0.18em] text-glow-blue">
+            <div className="font-brand text-base font-bold text-glow-blue">
               DIA<span className="text-glow-green">PASTASH</span>
             </div>
             <div className="mt-0.5 hidden font-tech text-[9px] uppercase tracking-[0.3em] text-cyan-200/40 sm:block">

@@ -7,8 +7,7 @@ import { IconTerminal, IconTrash } from "../Icons";
 
 type Filter = "all" | "tx" | "rx" | "sys";
 
-const FILTERS: { id: Filter; labelKey: "dirTx" | "dirRx" | "dirSys"; color: string }[] = [
-  { id: "all", labelKey: "dirTx", color: "text-cyan-200/70 border-white/10" }, // "all" label handled separately
+const FILTERS: { id: Exclude<Filter, "all">; labelKey: "dirTx" | "dirRx" | "dirSys"; color: string }[] = [
   { id: "tx", labelKey: "dirTx", color: "text-glow-yellow border-neon-yellow/40" },
   { id: "rx", labelKey: "dirRx", color: "text-glow-green border-neon-green/40" },
   { id: "sys", labelKey: "dirSys", color: "text-glow-pink border-neon-pink/40" },
@@ -33,7 +32,7 @@ function fmtBytes(n: number) {
 }
 
 export function TracerPanel() {
-  const { t, traces, traceStats, clearTraces, injectTestEvent } = useApp();
+  const { t, traces, traceStats, clearTraces, injectDemoEvent } = useApp();
   const [filter, setFilter] = useState<Filter>("all");
   const [paused, setPaused] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
@@ -76,7 +75,7 @@ export function TracerPanel() {
           >
             ALL
           </button>
-          {FILTERS.filter((f) => f.id !== "all").map((f) => (
+          {FILTERS.map((f) => (
             <button
               key={f.id}
               type="button"
@@ -93,7 +92,7 @@ export function TracerPanel() {
         <div className="flex gap-1.5">
           <button
             type="button"
-            onClick={injectTestEvent}
+            onClick={injectDemoEvent}
             className="rounded-md border border-neon-pink/40 px-2 py-1 font-tech text-[10px] uppercase tracking-wider text-glow-pink transition hover:bg-neon-pink/10"
           >
             ▷ {t("simulate")}
@@ -154,7 +153,9 @@ export function TracerPanel() {
 function Stat({ label, value, cls }: { label: string; value: string; cls: string }) {
   return (
     <div className="glass clip-hud rounded-lg border border-white/10 px-2 py-1.5 text-center">
-      <div className={cn("font-tech text-base font-bold leading-none", cls)} dir="ltr">{value}</div>
+      <div className={cn("font-tech text-base font-bold leading-none", cls)} dir="ltr">
+        {value}
+      </div>
       <div className="mt-1 font-tech text-[8px] uppercase tracking-wider text-cyan-200/40">{label}</div>
     </div>
   );

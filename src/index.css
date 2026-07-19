@@ -17,10 +17,18 @@
   --color-neon-pink: #ff00ff;
   --color-neon-yellow: #ffff00;
 
-  /* Typography (Tajawal is appended as the Persian-glyph fallback everywhere) */
-  --font-tech: "Share Tech Mono", "Tajawal", ui-monospace, monospace;
-  --font-display: "Rajdhani", "Tajawal", sans-serif;
-  --font-fa: "Tajawal", "Cairo", "Tahoma", sans-serif;
+  /* Typography
+     -- Vazirmatn is the primary Persian face (per spec); Tajawal/Cairo are
+        readable fallbacks and keep Persian glyphs in the tech font too.
+     -- Orbitron is reserved for the neon brand wordmark. */
+  --font-tech: "Share Tech Mono", "Vazirmatn", "Tajawal", ui-monospace, monospace;
+  --font-display: "Rajdhani", "Vazirmatn", "Tajawal", sans-serif;
+  --font-fa: "Vazirmatn", "Tajawal", "Cairo", "Tahoma", sans-serif;
+  --font-brand: "Orbitron", "Rajdhani", sans-serif;
+
+  /* User-selectable brand accent (overridden at runtime by Settings). */
+  --accent: #39ff14;
+  --accent-rgb: 57, 255, 20;
 
   /* Animations */
   --animate-pulse-glow: pulse-glow 1.6s ease-in-out infinite;
@@ -172,6 +180,7 @@ body {
   .font-tech { font-family: var(--font-tech); }
   .font-display { font-family: var(--font-display); }
   .font-fa { font-family: var(--font-fa); }
+  .font-brand { font-family: var(--font-brand); letter-spacing: 0.12em; }
 }
 
 /* ---------- Keyframes ---------- */

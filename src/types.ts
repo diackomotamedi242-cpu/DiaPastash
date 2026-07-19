@@ -1,8 +1,8 @@
 /**
- * DiaPastash — Core domain types
- * Shared by MqttService, StateManager (context) and UI components.
+ * DiaPastash — Core domain types (Backend/Presentation client edition).
+ * The browser talks ONLY to the secure backend over HTTPS + Socket.IO.
+ * No MQTT, no broker, no credentials live in these types.
  */
-
 import type { Lang } from "./i18n/translations";
 
 /* ---- System level ---- */
@@ -13,31 +13,32 @@ export type Severity = "ok" | "warning" | "alarm" | "info";
 
 export type ModuleType = "motion" | "ultrasonic" | "laser" | "rfid" | "generic";
 
-/** A single sensor module's live snapshot (StateManager unit). */
+/** Brand/accent theming preset (user preference only). */
+export type Accent = "green" | "cyan" | "pink" | "yellow" | "red";
+
+/** A single sensor module's live snapshot. */
 export interface ModuleState {
-  /** Raw code from the ESP32, e.g. "S01" */
   id: string;
   type: ModuleType;
-  /** Derived severity used for colour + headline */
   severity: Severity;
-  /** Raw value string (distance in cm, RFID UID, ...) */
+  /** Backend status message (e.g. "Idle", "120cm", a UID) — shown on the card. */
+  message?: string;
+  /** Derived scalar value (distance in cm / RFID UID) for emphasis display. */
   value?: string;
-  /** Last ESP32 event name, e.g. "LaserBeamBroken" */
   event?: string;
-  /** epoch ms of last update */
   updatedAt?: number;
 }
 
-/** Inbound JSON payload contract from the ESP32-S3. */
-export interface DeviceEvent {
-  module?: string;
+/** Inbound `security:event` payload from the backend (Socket.IO). */
+export interface SecurityEvent {
+  module?: string; // "M01" | "U01" | "S01" | "R01"
   event?: string;
   severity?: Severity | string;
   payload?: string;
-  uptime?: string;
-  state?: SystemState | string;
   distance?: number | string;
   uid?: string;
+  uptime?: string;
+  timestamp?: number;
   [key: string]: unknown;
 }
 
@@ -45,56 +46,39 @@ export interface LogEntry {
   id: string;
   timestamp: number;
   topic: string;
-  event: DeviceEvent;
+  event: SecurityEvent;
   severity: Severity;
-  /** True for locally-dispatched outbound commands */
   outbound?: boolean;
-  /** Pre-formatted headline shown in the terminal */
   summary: string;
 }
 
-/* ---- MQTT connection ---- */
-export type MqttStatus =
-  | "disconnected"
-  | "connecting"
-  | "connected"
-  | "reconnecting"
-  | "error"
-  | "closed";
+/** Overall system snapshot derived from `/system/state` + `system:state` socket. */
+export interface SystemSnapshot {
+  securityState: SystemState;
+  deviceOnline: boolean; // ESP32 reported by backend
+  backendOnline: boolean; // Socket.IO transport connected
+  demo: boolean;
+  lastSync?: number;
+}
 
-/* ---- Packet tracer (raw protocol I/O log) ---- */
+/* ---- Packet tracer (HTTP + Socket.IO I/O log) ---- */
 export type TraceDir = "tx" | "rx" | "sys";
 
 export interface TraceEntry {
   id: string;
   ts: number;
-  /** tx = outbound (we sent), rx = inbound (we received), sys = lifecycle/system */
   dir: TraceDir;
-  /** PUBLISH, MESSAGE, SUBSCRIBE, CONNECT, CONNECTED, RECONNECT, CLOSE, ERROR, DISCONNECT, SIM */
   kind: string;
   topic?: string;
   payload?: string;
   detail?: string;
 }
 
-/** All configurable MQTT topics. */
-export interface TopicConfig {
-  cmdArm: string;
-  cmdDisarm: string;
-  cmdSilence: string;
-  state: string;
-  alarm: string;
-  sensor: string;
-  rfid: string;
-  system: string;
-}
-
+/* ---- User preferences (no secrets) ---- */
 export interface Settings {
-  broker: string;
-  port: string;
-  path: string;
   appIconUrl: string;
-  topics: TopicConfig;
+  themeAccent: Accent;
+  notifications: boolean;
 }
 
 export interface AppConfig {

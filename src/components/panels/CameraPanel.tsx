@@ -8,7 +8,7 @@ import { IconCamera } from "../Icons";
  * For now we render an "offline / coming soon" HUD box.
  */
 export function CameraPanel() {
-  const { t, settings } = useApp();
+  const { t } = useApp();
   return (
     <div className="animate-rise">
       <PanelHeader title={t("cameraTitle")} desc={`ESP32-S3-CAM · ${t("cameraId")}`} Icon={IconCamera} accent="pink" />
@@ -34,9 +34,7 @@ export function CameraPanel() {
             <IconCamera className="h-8 w-8 text-glow-pink" />
           </div>
           <div>
-            <div className="font-display text-2xl font-bold text-glow-red animate-pulse-glow">
-              {t("cameraOffline")}
-            </div>
+            <div className="font-display text-2xl font-bold text-glow-red animate-pulse-glow">{t("cameraOffline")}</div>
             <div className="mt-1 font-tech text-sm uppercase tracking-[0.3em] text-glow-pink">
               {t("cameraComingSoon")}
             </div>
@@ -51,7 +49,7 @@ export function CameraPanel() {
           {t("cameraId")} · OFFLINE
         </div>
         <div className="absolute bottom-3 left-1/2 -translate-x-1/2 font-tech text-[10px] uppercase tracking-widest text-cyan-200/30">
-          {settings.broker}:{settings.port}
+          ESP32-S3-CAM
         </div>
       </div>
 

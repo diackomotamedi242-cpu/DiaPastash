@@ -87,7 +87,7 @@ export function ModuleCard({ module }: { module: ModuleState }) {
         )}
       </div>
 
-      {/* value line */}
+      {/* value / message line */}
       <div className="relative mt-2 min-h-[28px]">
         {module.type === "ultrasonic" && module.value ? (
           <div className="flex items-baseline gap-1.5">
@@ -98,6 +98,10 @@ export function ModuleCard({ module }: { module: ModuleState }) {
           <div className="font-tech text-sm tracking-wider text-glow-pink" dir="ltr">
             {module.value}
           </div>
+        ) : hasData && module.message ? (
+          <p className="font-tech text-xs leading-snug text-cyan-100/70" dir="ltr">
+            {module.message}
+          </p>
         ) : !hasData ? (
           <p className="font-tech text-[11px] text-cyan-200/30">{t("moduleOffline")}</p>
         ) : null}
