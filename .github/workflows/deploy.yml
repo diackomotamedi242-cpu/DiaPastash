@@ -1,8 +1,8 @@
-name: Deploy Vite Site to Pages
+name: Deploy Vite to GitHub Pages
 
 on:
   push:
-    branches: ["main"] # هر وقت روی برنچ main پوش کردی اجرا بشه
+    branches: [main]
 
 permissions:
   contents: read
@@ -13,29 +13,33 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
-      - name: Set up Node
+
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
+
       - name: Install dependencies
         run: npm install
-      - name: Build
+
+      - name: Build project
         run: npm run build
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./dist # پوشه خروجی Vite
+          path: ./dist
 
   deploy:
     needs: build
     runs-on: ubuntu-latest
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Deploy to GitHub Pages
-        id: deployment
         uses: actions/deploy-pages@v4
