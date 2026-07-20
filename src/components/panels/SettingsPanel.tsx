@@ -12,8 +12,9 @@ import {
   deriveSocketUrl,
 } from "../../config";
 import { fileToResizedDataUrl, fmtBytes } from "../../utils/image";
+import { api } from "../../services/ApiClient";
 import { cn } from "../../utils/cn";
-import type { Accent, ConnectionConfig, MqttTopics, Settings } from "../../types";
+import type { Accent, ConnectionConfig, MqttSettingsPayload, MqttTopics, Settings } from "../../types";
 import { IconBell, IconImage, IconPlug, IconRefresh, IconSave, IconSettings, IconShield, IconTrash, IconUpload } from "../Icons";
 
 export function SettingsPanel() {
@@ -38,6 +39,9 @@ export function SettingsPanel() {
   const [iconBusy, setIconBusy] = useState(false);
   const [iconErr, setIconErr] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
+  // MQTT broker URL + topics are sourced from the BACKEND (source of truth).
+  const [mqttLoading, setMqttLoading] = useState(true);
+  const [mqttSaving, setMqttSaving] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => setDraft(settings), [settings]);
@@ -54,9 +58,50 @@ export function SettingsPanel() {
   const patchTopic = (k: keyof MqttTopics, v: string) =>
     setConnDraft((d) => ({ ...d, topics: { ...d.topics, [k]: v } }));
 
-  const handleSaveConnection = () => {
-    saveConnectionConfig(connDraft);
-    notify(t("connectionSaved"));
+  // On mount: pull MQTT broker URL + topics from the backend (source of truth)
+  // and populate the inputs. localStorage values are only used as placeholders
+  // until the backend responds, or if the endpoint is unreachable.
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      setMqttLoading(true);
+      try {
+        const data = await api.getMqttSettings();
+        if (!active) return;
+        setConnDraft((prev) => ({
+          ...prev,
+          brokerUrl: data.brokerUrl ?? prev.brokerUrl,
+          topics: { ...prev.topics, ...data.topics },
+        }));
+      } catch {
+        /* backend unreachable / endpoint missing — keep local placeholder values */
+      } finally {
+        if (active) setMqttLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const handleSaveConnection = async () => {
+    if (mqttSaving) return;
+    setMqttSaving(true);
+    try {
+      // 1. Persist the Backend URL (+ port cache) to localStorage.
+      saveConnectionConfig(connDraft);
+      // 2. POST broker URL + topics to the backend (authoritative MQTT store).
+      const payload: MqttSettingsPayload = {
+        brokerUrl: connDraft.brokerUrl,
+        topics: connDraft.topics,
+      };
+      await api.saveMqttSettings(payload);
+      notify(t("mqttSaved"));
+    } catch {
+      notify(t("mqttSaveError"), true);
+    } finally {
+      setMqttSaving(false);
+    }
   };
 
   const handleReconnect = () => {
@@ -127,10 +172,15 @@ export function SettingsPanel() {
           {t("backendUrlHint")}
         </p>
 
-        {/* MQTT broker (UI-only) */}
+        {/* MQTT broker (broker URL + topics come from the backend) */}
         <div className="mb-2 flex items-center gap-2">
           <IconPlug className="h-4 w-4 text-glow-pink" />
           <h4 className="font-display text-xs font-bold uppercase text-glow-pink">{t("brokerConfig")}</h4>
+          {mqttLoading && (
+            <span className="ms-auto flex items-center gap-1.5 font-tech text-[9px] uppercase tracking-wider text-cyan-200/40">
+              <IconRefresh className="h-3 w-3 animate-spin" /> {t("mqttLoading")}
+            </span>
+          )}
         </div>
         <div className="grid grid-cols-1 gap-2.5">
           <Field label={t("brokerUrl")}>
@@ -158,9 +208,15 @@ export function SettingsPanel() {
           <button
             type="button"
             onClick={handleSaveConnection}
-            className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-neon-green/60 bg-neon-green/10 py-2.5 font-display text-xs font-bold uppercase text-glow-green shadow-glow-green transition active:scale-[0.98]"
+            disabled={mqttSaving || mqttLoading}
+            className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-neon-green/60 bg-neon-green/10 py-2.5 font-display text-xs font-bold uppercase text-glow-green shadow-glow-green transition active:scale-[0.98] disabled:opacity-60"
           >
-            <IconSave className="h-4 w-4" /> {t("save")}
+            {mqttSaving ? (
+              <IconRefresh className="h-4 w-4 animate-spin" />
+            ) : (
+              <IconSave className="h-4 w-4" />
+            )}
+            {mqttSaving ? t("saving") : t("save")}
           </button>
           <button
             type="button"

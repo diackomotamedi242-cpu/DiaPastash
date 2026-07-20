@@ -88,6 +88,13 @@ export interface ConnectionConfig {
   topics: MqttTopics;
 }
 
+/** Backend MQTT settings payload (GET/POST /settings/mqtt).
+ *  The backend is the source of truth for the broker URL + topics. */
+export interface MqttSettingsPayload {
+  brokerUrl: string;
+  topics: MqttTopics;
+}
+
 /* ---- Packet tracer (HTTP + Socket.IO I/O log) ---- */
 export type TraceDir = "tx" | "rx" | "sys";
 

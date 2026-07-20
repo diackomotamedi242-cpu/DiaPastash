@@ -8,7 +8,7 @@
  * • Emits raw traces to a sink so the Packet Tracer panel can show HTTP I/O.
  */
 import { getActiveApiBase } from "../config";
-import type { TraceDir, TraceEntry } from "../types";
+import type { MqttSettingsPayload, TraceDir, TraceEntry } from "../types";
 
 export type TraceSink = (dir: TraceDir, kind: string, data?: Partial<TraceEntry>) => void;
 
@@ -113,4 +113,15 @@ export const api = {
    *  The backend then emits modules:sync / module:updated over Socket.IO. */
   refreshModules: () =>
     request<Record<string, unknown>>("/system/modules/refresh", { method: "POST" }),
+
+  /** GET /settings/mqtt → { brokerUrl, topics }. The backend is the source of
+   *  truth for MQTT broker URL + topics (NOT localStorage). */
+  getMqttSettings: () => request<MqttSettingsPayload>("/settings/mqtt"),
+
+  /** POST /settings/mqtt → persist broker URL + topics on the backend. */
+  saveMqttSettings: (payload: MqttSettingsPayload) =>
+    request<{ message?: string }>("/settings/mqtt", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
 };
