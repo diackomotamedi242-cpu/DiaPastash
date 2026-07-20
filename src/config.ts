@@ -12,19 +12,14 @@
  * ╚══════════════════════════════════════════════════════════════════════╝
  */
 
-/** Backend REST API base (must end without trailing slash). */
-export const API_BASE_URL = "https://diapastash-backend.onrender.com/api/v1";
-
-/** Backend Socket.IO origin. */
-export const SOCKET_URL = "https://diapastash-backend.onrender.com";
-
 export const STORAGE_KEYS = {
   settings: "diapastash.settings",
   lang: "diapastash.lang",
   demo: "diapastash.demo", // local UI preview flag only — never a real session
+  connection: "diapastash.connection", // backend + MQTT broker/topics config
 } as const;
 
-import type { Accent, ModuleType, Settings } from "./types";
+import type { Accent, ConnectionConfig, MqttTopics, ModuleType, Settings } from "./types";
 
 /** User-preference defaults (NO backend secrets here). */
 export function defaultSettings(): Settings {
@@ -34,6 +29,95 @@ export function defaultSettings(): Settings {
     notifications: false,
   };
 }
+
+/* ===========================================================================
+   Connection configuration (Backend + MQTT broker/topics).
+   - The backend URL is used DYNAMICALLY for REST + Socket.IO after save.
+   - The MQTT broker/topics are UI-level editable settings stored in
+     localStorage and prepared to be sent to the backend later. The frontend
+     NEVER connects to MQTT directly (no mqtt.js).
+   =========================================================================== */
+
+/** Compile-time default backend origin. Editable from Settings afterwards. */
+export const DEFAULT_BACKEND_URL = "https://diapastash-backend.onrender.com";
+
+/** Topic defaults (match the original project's MQTT topic scheme). */
+export function defaultTopics(): MqttTopics {
+  return {
+    cmdArm: "security/cmd/arm",
+    cmdDisarm: "security/cmd/disarm",
+    cmdSilence: "security/cmd/silence",
+    state: "security/state",
+    eventAlarm: "security/events/alarm",
+    eventSensor: "security/events/sensor",
+    eventRfid: "security/events/rfid",
+    eventSystem: "security/events/system",
+  };
+}
+
+/** Default connection config (used when nothing is stored in localStorage). */
+export function defaultConnectionConfig(): ConnectionConfig {
+  return {
+    backendUrl: DEFAULT_BACKEND_URL,
+    brokerUrl: "broker.hivemq.com",
+    brokerPort: "8884",
+    topics: defaultTopics(),
+  };
+}
+
+/** Normalize a user-entered backend URL into a REST base ending in /api/v1. */
+export function deriveApiBase(backendUrl: string): string {
+  const u = (backendUrl || "").trim().replace(/\/+$/, "");
+  if (!u) return `${DEFAULT_BACKEND_URL}/api/v1`;
+  return /\/api\/v\d+$/i.test(u) ? u : `${u}/api/v1`;
+}
+
+/** Normalize a user-entered backend URL into a Socket.IO origin. */
+export function deriveSocketUrl(backendUrl: string): string {
+  const u = (backendUrl || "").trim().replace(/\/+$/, "");
+  if (!u) return DEFAULT_BACKEND_URL;
+  return u.replace(/\/api\/v\d+$/i, "");
+}
+
+/** Read + merge the stored connection config with the defaults. */
+export function loadConnectionConfig(): ConnectionConfig {
+  const base = defaultConnectionConfig();
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.connection);
+    if (!raw) return base;
+    const parsed = JSON.parse(raw) as Partial<ConnectionConfig>;
+    return {
+      ...base,
+      ...parsed,
+      topics: { ...base.topics, ...(parsed.topics ?? {}) },
+    };
+  } catch {
+    return base;
+  }
+}
+
+/** Persist the connection config. */
+export function saveConnectionConfig(cfg: ConnectionConfig): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS.connection, JSON.stringify(cfg));
+  } catch {
+    /* ignore quota / serialization errors */
+  }
+}
+
+/** Active REST API base (derived from the stored backend URL, read fresh). */
+export function getActiveApiBase(): string {
+  return deriveApiBase(loadConnectionConfig().backendUrl);
+}
+
+/** Active Socket.IO origin (derived from the stored backend URL, read fresh). */
+export function getActiveSocketUrl(): string {
+  return deriveSocketUrl(loadConnectionConfig().backendUrl);
+}
+
+/** Backward-compatible aliases for the currently active endpoints. */
+export const API_BASE_URL = getActiveApiBase();
+export const SOCKET_URL = getActiveSocketUrl();
 
 /** Accent presets → drives the `--accent` / `--accent-rgb` CSS variables. */
 export const ACCENTS: {

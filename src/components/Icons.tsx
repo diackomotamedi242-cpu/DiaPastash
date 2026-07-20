@@ -179,3 +179,11 @@ export const IconBell = (p: P) => (
     <path d="M13.7 21a2 2 0 0 1-3.4 0" />
   </svg>
 );
+
+export const IconPlug = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M9 2v4M15 2v4" />
+    <path d="M7 6h10v4a5 5 0 0 1-10 0V6Z" />
+    <path d="M12 15v3a3 3 0 0 0 3 3" />
+  </svg>
+);

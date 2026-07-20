@@ -11,7 +11,6 @@ const __dirname = path.dirname(__filename);
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss(), viteSingleFile()],
-  base: '/DiaPastash/', // <--- این خط اضافه شد
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "src"),

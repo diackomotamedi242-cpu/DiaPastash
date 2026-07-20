@@ -89,11 +89,33 @@ export function ModuleCard({ module }: { module: ModuleState }) {
 
       {/* value / message line */}
       <div className="relative mt-2 min-h-[28px]">
-        {module.type === "ultrasonic" && module.value ? (
-          <div className="flex items-baseline gap-1.5">
-            <span className="font-tech text-2xl font-bold text-glow-blue">{module.value}</span>
-            <span className="font-tech text-xs text-cyan-200/50">cm</span>
-          </div>
+        {module.type === "ultrasonic" && hasData ? (
+          // Ultrasonic distance: the value (cm) from backend `payload` is ALWAYS
+          // shown, in a fixed neon-purple (#BF00FF). When there is no reading and
+          // the module is normal, we show "Out of range".
+          module.value ? (
+            <div className="flex items-baseline gap-2">
+              <span className="font-tech text-[11px] uppercase tracking-wider text-cyan-200/50">
+                {t("distance")}:
+              </span>
+              <span
+                className="font-tech text-2xl font-bold"
+                dir="ltr"
+                style={{ color: "#BF00FF", textShadow: "0 0 6px rgba(191,0,255,0.9), 0 0 16px rgba(191,0,255,0.45)" }}
+              >
+                {module.value}
+              </span>
+              <span className="font-tech text-xs text-cyan-200/50">cm</span>
+            </div>
+          ) : module.severity === "ok" ? (
+            <p className="font-tech text-xs text-cyan-200/40">— {t("outOfRange")}</p>
+          ) : module.message ? (
+            <p className={cn("font-tech text-xs leading-snug", style.text)} dir="ltr">
+              {module.message}
+            </p>
+          ) : (
+            <p className="font-tech text-xs text-cyan-200/40">— {t("outOfRange")}</p>
+          )
         ) : module.type === "rfid" && module.value ? (
           <div className="font-tech text-sm tracking-wider text-glow-pink" dir="ltr">
             {module.value}

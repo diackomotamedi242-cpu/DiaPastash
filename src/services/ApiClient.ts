@@ -7,7 +7,7 @@
  * • No credentials, tokens, broker addresses or MQTT topics exist in this file.
  * • Emits raw traces to a sink so the Packet Tracer panel can show HTTP I/O.
  */
-import { API_BASE_URL } from "../config";
+import { getActiveApiBase } from "../config";
 import type { TraceDir, TraceEntry } from "../types";
 
 export type TraceSink = (dir: TraceDir, kind: string, data?: Partial<TraceEntry>) => void;
@@ -40,7 +40,9 @@ interface ApiEnvelope<T> {
 /** Core fetch wrapper: JSON in/out, credentials always included, traced. */
 async function request<T = unknown>(path: string, init: RequestInit = {}): Promise<T> {
   const method = (init.method as string) || "GET";
-  const url = `${API_BASE_URL}${path}`;
+  // Read the active base fresh on each call so a saved backend URL takes effect
+  // immediately without a page reload.
+  const url = `${getActiveApiBase()}${path}`;
   trace("tx", method, { detail: path });
 
   let res: Response;
@@ -106,4 +108,9 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ command }),
     }),
+
+  /** POST /system/modules/refresh → ask the backend to push fresh module state.
+   *  The backend then emits modules:sync / module:updated over Socket.IO. */
+  refreshModules: () =>
+    request<Record<string, unknown>>("/system/modules/refresh", { method: "POST" }),
 };

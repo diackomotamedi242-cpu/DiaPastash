@@ -61,6 +61,33 @@ export interface SystemSnapshot {
   lastSync?: number;
 }
 
+/* ---- Connection settings (UI-level, persisted in localStorage) ---- */
+
+/** MQTT topic map — editable in Settings, prepared to be sent to backend later.
+ *  The frontend never connects to MQTT directly; these are configuration only. */
+export interface MqttTopics {
+  cmdArm: string;
+  cmdDisarm: string;
+  cmdSilence: string;
+  state: string;
+  eventAlarm: string;
+  eventSensor: string;
+  eventRfid: string;
+  eventSystem: string;
+}
+
+/** Connection configuration. `backendUrl` drives BOTH REST and Socket.IO. */
+export interface ConnectionConfig {
+  /** Backend base URL (origin or full /api/v1 path). Drives REST + Socket.IO. */
+  backendUrl: string;
+  /** MQTT broker URL — UI config only, never used by the frontend directly. */
+  brokerUrl: string;
+  /** MQTT broker port — UI config only. */
+  brokerPort: string;
+  /** MQTT topic map — UI config only. */
+  topics: MqttTopics;
+}
+
 /* ---- Packet tracer (HTTP + Socket.IO I/O log) ---- */
 export type TraceDir = "tx" | "rx" | "sys";
 

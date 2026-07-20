@@ -8,10 +8,11 @@
  * Server → client events:
  *   • system:state    → overall Armed/Disarmed/Alarm + device online
  *   • modules:sync    → last-known state of ALL modules (sent on connect)
+ *   • module:updated  → live per-module status change (updates one card)
  *   • security:event  → a sensor event (logged + drives the Modules panel)
  */
 import { io, type Socket } from "socket.io-client";
-import { SOCKET_URL } from "../config";
+import { getActiveSocketUrl } from "../config";
 import type { TraceDir, TraceEntry } from "../types";
 
 export type TraceSink = (dir: TraceDir, kind: string, data?: Partial<TraceEntry>) => void;
@@ -25,6 +26,7 @@ class SocketService {
 
   onSystemState?: StateHandler;
   onModulesSync?: SyncHandler;
+  onModuleUpdated?: SyncHandler;
   onSecurityEvent?: EventHandler;
   onConn?: ConnHandler;
   traceSink?: TraceSink;
@@ -33,9 +35,12 @@ class SocketService {
     return !!this.socket?.connected;
   }
 
-  connect(): void {
-    if (this.socket) return;
-    this.socket = io(SOCKET_URL, {
+  /** Connect (or reconnect) to the Socket.IO backend. Pass a URL to override
+   *  the active configured origin — used by the "Reconnect Backend" action. */
+  connect(url?: string): void {
+    this.disconnect(true);
+    const origin = url && url.trim() ? url.trim() : getActiveSocketUrl();
+    this.socket = io(origin, {
       withCredentials: true,
       transports: ["websocket", "polling"],
       reconnection: true,
@@ -63,13 +68,19 @@ class SocketService {
       this.emitTrace("rx", "modules:sync", { payload: safe(d) });
       this.onModulesSync?.(d);
     });
-    this.socket.on("security:event", (d: unknown) => {
+    this.socket.on("module:updated", (d: unknown) => {
+      this.emitTrace("rx", "module:updated", { payload: safe(d) });
+      this.onModuleUpdated?.(d);
+    });
+      this.socket.on("security:event", (d: unknown) => {
       this.emitTrace("rx", "security:event", { payload: safe(d) });
       this.onSecurityEvent?.(d);
     });
   }
 
-  disconnect(): void {
+  /** End the current connection. `silent` just skips the trace. */
+  disconnect(silent = false): void {
+    if (!silent && this.socket) this.emitTrace("sys", "SOCKET_DISCONNECT", {});
     try {
       this.socket?.removeAllListeners();
       this.socket?.disconnect();

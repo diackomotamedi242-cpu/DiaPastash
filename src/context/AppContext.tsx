@@ -31,10 +31,14 @@ import {
   MODULE_REGISTRY,
   STORAGE_KEYS,
   defaultSettings,
+  deriveSocketUrl,
   findModuleDef,
+  loadConnectionConfig,
+  saveConnectionConfig as persistConnectionConfig,
 } from "../config";
 import { translations, type Lang, type TranslationKey } from "../i18n/translations";
 import type {
+  ConnectionConfig,
   LogEntry,
   ModuleState,
   SecurityEvent,
@@ -113,21 +117,69 @@ function buildSummary(evt: SecurityEvent): string {
 }
 
 /**
- * Best-effort scalar extraction from a backend status string, so distance/UID
- * values get the emphasis styling on the card. Falls back to undefined so the
- * plain message text is shown instead.
+ * Extract an emphasis value from a backend module payload.
+ *
+ * The backend places per-module scalars in `payload` (e.g. U01 distance in cm
+ * like "45.50", R01 UID string). We prefer `payload`, then fall back to a
+ * number/UID parsed out of the human `message` text. Returns undefined so the
+ * plain message is rendered when no scalar is available.
  */
-function extractValueFromMessage(type: ModuleState["type"], message?: string): string | undefined {
-  if (!message) return undefined;
-  const s = String(message).trim();
+function extractModuleValue(
+  type: ModuleState["type"],
+  payload?: unknown,
+  message?: string,
+): string | undefined {
   if (type === "ultrasonic") {
-    const m = /(-?\d+(?:\.\d+)?)/.exec(s);
-    return m ? m[1] : undefined;
+    if (payload != null && String(payload).trim() !== "") return String(payload).trim();
+    if (message) {
+      const m = /(-?\d+(?:\.\d+)?)/.exec(String(message));
+      if (m) return m[1];
+    }
+    return undefined;
   }
   if (type === "rfid") {
+    const p = payload != null ? String(payload).trim() : "";
+    if (p) return p;
+    const s = message ? String(message).trim() : "";
     if (/^[0-9a-fA-F]{2}([: -]?[0-9a-fA-F]{2}){2,}/.test(s)) return s;
+    return undefined;
   }
   return undefined;
+}
+
+/** Parse a backend `lastUpdate` (ISO string or epoch ms) into epoch ms. */
+function parseTime(v?: string | number): number | undefined {
+  if (v == null || v === "") return undefined;
+  if (typeof v === "number") return v > 0 ? v : undefined;
+  const ms = Date.parse(v);
+  return Number.isNaN(ms) ? undefined : ms;
+}
+
+/** Threshold below which an ultrasonic reading counts as a distance breach. */
+const DISTANCE_BREACH_CM = 100; // 1 meter
+
+/**
+ * Ultrasonic (U01): a measured distance BELOW 1 meter is an intrusion and must
+ * drive the card to a full ALARM (red) state — even if the backend reported a
+ * softer "warning"/"normal" status. Returns `base` for non-ultrasonic modules
+ * or when no reading / a far reading is available.
+ */
+function resolveSeverity(
+  type: ModuleState["type"],
+  payload: unknown,
+  distance: unknown,
+  base: Severity,
+): Severity {
+  if (type !== "ultrasonic") return base;
+  const src =
+    distance != null && String(distance).trim() !== ""
+      ? String(distance)
+      : payload != null
+        ? String(payload)
+        : "";
+  const cm = parseFloat(src);
+  if (!Number.isNaN(cm) && cm < DISTANCE_BREACH_CM) return "alarm";
+  return base;
 }
 
 function initialModules(): Record<string, ModuleState> {
@@ -188,6 +240,11 @@ interface AppContextValue {
   settings: Settings;
   saveSettings: (s: Settings) => void;
 
+  // connection config (Backend + MQTT broker/topics, UI-level)
+  connection: ConnectionConfig;
+  saveConnectionConfig: (c: ConnectionConfig) => void;
+  reconnectBackend: () => void;
+
   // system / connection
   system: SystemSnapshot;
   refreshSystemState: () => Promise<void>;
@@ -199,6 +256,9 @@ interface AppContextValue {
   traceStats: { tx: number; rx: number; bytes: number };
   pendingCommand: "arm" | "disarm" | "silence" | null;
   sendCommand: (cmd: "arm" | "disarm" | "silence") => Promise<void>;
+  // POST /system/modules/refresh — asks backend to push fresh module state.
+  refreshingModules: boolean;
+  refreshModules: () => Promise<boolean>;
   injectDemoEvent: () => void;
   clearLogs: () => void;
   clearTraces: () => void;
@@ -221,6 +281,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState<Settings>(() =>
     loadJSON<Settings>(STORAGE_KEYS.settings, defaultSettings()),
   );
+  const [connection, setConnection] = useState<ConnectionConfig>(() => loadConnectionConfig());
 
   const [authed, setAuthed] = useState(false);
   const [authChecking, setAuthChecking] = useState(true);
@@ -231,6 +292,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [traces, setTraces] = useState<TraceEntry[]>([]);
   const [pendingCommand, setPendingCommand] = useState<"arm" | "disarm" | "silence" | null>(null);
+  const [refreshingModules, setRefreshingModules] = useState(false);
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | "unsupported">(
     typeof Notification !== "undefined" ? Notification.permission : "unsupported",
   );
@@ -240,6 +302,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     settingsRef.current = settings;
   }, [settings]);
+  const connectionRef = useRef(connection);
+  useEffect(() => {
+    connectionRef.current = connection;
+  }, [connection]);
   const demoRef = useRef(demo);
   useEffect(() => {
     demoRef.current = demo;
@@ -303,12 +369,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!def) return; // unknown module — still logged, no card
     const value = computeValue(def.type, evt);
     const message = typeof evt.message === "string" ? evt.message : evt.payload;
+    // Promote ultrasonic distance breaches (< 1 m) to a full alarm regardless
+    // of the backend-reported severity.
+    const finalSeverity = resolveSeverity(def.type, evt.payload, evt.distance, severity);
     setModulesMap((prev) => ({
       ...prev,
       [def.id]: {
         id: def.id,
         type: def.type,
-        severity,
+        severity: finalSeverity,
         value,
         message,
         event: evt.event,
@@ -320,10 +389,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
   /**
    * `modules:sync` — received right after connecting. Hydrates EVERY module
    * card with the backend's last-known state so the panel is never blank.
-   * Payload shape: { "M01": { status, message }, "U01": {...}, ... }
+   * Entry shape: { "M01": { status, message, payload, lastUpdate }, ... }
    */
   const handleModulesSync = useCallback((data: unknown) => {
-    const d = (data ?? {}) as Record<string, { status?: string; message?: string }>;
+    const d = (data ?? {}) as Record<
+      string,
+      { status?: string; message?: string; payload?: unknown; lastUpdate?: string | number }
+    >;
     setModulesMap((prev) => {
       const next = { ...prev };
       const now = Date.now();
@@ -332,19 +404,59 @@ export function AppProvider({ children }: { children: ReactNode }) {
         const entry = d[m.id] ?? d[m.id.toLowerCase()];
         if (!entry) continue;
         touched = true;
-        const severity = normalizeSeverity(entry.status, undefined);
-        const value = extractValueFromMessage(m.type, entry.message);
+        const severity = resolveSeverity(
+          m.type,
+          entry.payload,
+          undefined,
+          normalizeSeverity(entry.status, entry.message),
+        );
+        const value = extractModuleValue(m.type, entry.payload, entry.message);
         next[m.id] = {
           id: m.id,
           type: m.type,
           severity,
           value,
           message: entry.message,
-          updatedAt: now,
+          updatedAt: parseTime(entry.lastUpdate) ?? now,
         };
       }
       return touched ? next : prev;
     });
+  }, []);
+
+  /**
+   * `module:updated` — real-time per-module status change (live). Updates the
+   * single matching card. For U01 the distance (cm) lives in `payload`.
+   * Payload: { id, status, message, payload, lastUpdate }
+   */
+  const handleModuleUpdated = useCallback((data: unknown) => {
+    const d = (data ?? {}) as {
+      id?: string;
+      status?: string;
+      message?: string;
+      payload?: unknown;
+      lastUpdate?: string | number;
+    };
+    const def = findModuleDef(d.id);
+    if (!def) return; // unknown module — nothing to render
+    const severity = resolveSeverity(
+      def.type,
+      d.payload,
+      undefined,
+      normalizeSeverity(d.status, d.message),
+    );
+    const value = extractModuleValue(def.type, d.payload, d.message);
+    setModulesMap((prev) => ({
+      ...prev,
+      [def.id]: {
+        id: def.id,
+        type: def.type,
+        severity,
+        value,
+        message: d.message,
+        updatedAt: parseTime(d.lastUpdate) ?? Date.now(),
+      },
+    }));
   }, []);
 
   /* ---- inbound socket handlers ---- */
@@ -419,6 +531,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     socketService.onConn = (c) => setSystem((prev) => ({ ...prev, backendOnline: c }));
     socketService.onSystemState = handleSystemState;
     socketService.onModulesSync = handleModulesSync;
+    socketService.onModuleUpdated = handleModuleUpdated;
     socketService.onSecurityEvent = handleSecurityEvent;
     socketService.traceSink = pushTrace;
     setApiTraceSink(pushTrace);
@@ -447,6 +560,57 @@ export function AppProvider({ children }: { children: ReactNode }) {
     } catch {
       setSystem((prev) => ({ ...prev, backendOnline: false }));
     }
+  }, []);
+
+  /**
+   * Force a fresh Socket.IO connection using the (possibly new) backend URL.
+   * Tears down the current socket and re-establishes it, then re-fetches
+   * system state. Safe to call from Settings after saving a new backend URL.
+   */
+  const reconnectBackend = useCallback(() => {
+    if (demoRef.current) return;
+    const url = deriveSocketUrl(connectionRef.current.backendUrl);
+    // Re-bind handlers (connect() wipes listeners via disconnect).
+    socketService.onConn = (c) => setSystem((prev) => ({ ...prev, backendOnline: c }));
+    socketService.onSystemState = handleSystemState;
+    socketService.onModulesSync = handleModulesSync;
+    socketService.onModuleUpdated = handleModuleUpdated;
+    socketService.onSecurityEvent = handleSecurityEvent;
+    socketService.traceSink = pushTrace;
+    socketService.connect(url);
+    void refreshSystemState();
+  }, [handleModuleUpdated, handleModulesSync, handleSecurityEvent, handleSystemState, pushTrace, refreshSystemState]);
+
+  /**
+   * POST /system/modules/refresh — ask the backend to re-emit fresh module
+   * state (modules:sync / module:updated / security:event). We do NOT fake
+   * anything here; the UI simply waits for the backend's socket updates.
+   * Returns true on success, false on error. No-ops in demo mode.
+   */
+  const refreshModules = useCallback(async (): Promise<boolean> => {
+    if (demoRef.current) {
+      // In demo, simulate a refresh by re-seeding sample module data.
+      setRefreshingModules(true);
+      await new Promise((r) => setTimeout(r, 600));
+      setModulesMap(demoModules());
+      setRefreshingModules(false);
+      return true;
+    }
+    setRefreshingModules(true);
+    try {
+      await api.refreshModules();
+      return true;
+    } catch {
+      return false;
+    } finally {
+      setRefreshingModules(false);
+    }
+  }, []);
+
+  /** Persist connection config (backend + MQTT broker/topics) to localStorage. */
+  const saveConnectionConfig = useCallback((next: ConnectionConfig) => {
+    setConnection(next);
+    persistConnectionConfig(next);
   }, []);
 
   const login = useCallback(
@@ -526,19 +690,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
   );
 
   const injectDemoEvent = useCallback(() => {
-    const scenarios: {
-      module: string;
-      event: string;
-      severity: Severity;
-      distance?: string;
-      uid?: string;
-    }[] = [
+    // Ultrasonic (U01) demos the live `module:updated` channel — distance in `payload`.
+    if (Math.random() < 0.45) {
+      const u = [
+        { status: "warning", message: "DistanceBreached", payload: String(15 + Math.floor(Math.random() * 25)) },
+        { status: "normal", message: "Clear", payload: String(80 + Math.floor(Math.random() * 120)) },
+        { status: "normal", message: "Clear", payload: "" }, // nothing in range → "No target"
+        { status: "alarm", message: "IntrusionProximity", payload: String(2 + Math.floor(Math.random() * 8)) },
+      ][Math.floor(Math.random() * 4)];
+      const data = { id: "U01", status: u.status, message: u.message, payload: u.payload, lastUpdate: new Date().toISOString() };
+      pushTrace("rx", "module:updated", { payload: JSON.stringify(data), detail: "simulated" });
+      handleModuleUpdated(data);
+      return;
+    }
+
+    // Other modules demo the `security:event` channel (also updates the card).
+    const scenarios: { module: string; event: string; severity: Severity; uid?: string }[] = [
       { module: "S01", event: "LaserBeamBroken", severity: "alarm" },
       { module: "S01", event: "LaserRestored", severity: "ok" },
       { module: "M01", event: "MotionDetected", severity: "alarm" },
       { module: "M01", event: "MotionClear", severity: "ok" },
-      { module: "U01", event: "Proximity", severity: "warning", distance: String(15 + Math.floor(Math.random() * 25)) },
-      { module: "U01", event: "Proximity", severity: "ok", distance: String(80 + Math.floor(Math.random() * 120)) },
       { module: "R01", event: "CardScanned", severity: "ok", uid: randUid() },
     ];
     const s = scenarios[Math.floor(Math.random() * scenarios.length)];
@@ -546,15 +717,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
       module: s.module,
       event: s.event,
       severity: s.severity,
-      payload: s.uid ?? s.distance ?? "",
+      payload: s.uid ?? "",
       uptime: `${10 + Math.floor(Math.random() * 900)}s`,
-      distance: s.distance,
       uid: s.uid,
     };
-    const payload = JSON.stringify(evt);
-    pushTrace("rx", "security:event", { payload, detail: "simulated" });
+    pushTrace("rx", "security:event", { payload: JSON.stringify(evt), detail: "simulated" });
     handleSecurityEvent(evt);
-  }, [handleSecurityEvent, pushTrace]);
+  }, [handleModuleUpdated, handleSecurityEvent, pushTrace]);
 
   const clearLogs = useCallback(() => setLogs([]), []);
   const clearTraces = useCallback(() => setTraces([]), []);
@@ -614,6 +783,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     demo,
     settings,
     saveSettings,
+    connection,
+    saveConnectionConfig,
+    reconnectBackend,
     system,
     refreshSystemState,
     modules,
@@ -622,6 +794,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     traceStats,
     pendingCommand,
     sendCommand,
+    refreshingModules,
+    refreshModules,
     injectDemoEvent,
     clearLogs,
     clearTraces,

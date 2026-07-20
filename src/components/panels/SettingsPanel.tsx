@@ -4,17 +4,26 @@ import { PanelHeader } from "../PanelHeader";
 import { ConnectionPill } from "../ConnectionPill";
 import { InstallModal } from "../InstallModal";
 import { useInstallPrompt } from "../../hooks/useInstallPrompt";
-import { ACCENTS, API_BASE_URL, SOCKET_URL, defaultSettings } from "../../config";
+import {
+  ACCENTS,
+  defaultSettings,
+  defaultConnectionConfig,
+  deriveApiBase,
+  deriveSocketUrl,
+} from "../../config";
 import { fileToResizedDataUrl, fmtBytes } from "../../utils/image";
 import { cn } from "../../utils/cn";
-import type { Accent, Settings } from "../../types";
-import { IconBell, IconImage, IconRefresh, IconSave, IconSettings, IconShield, IconTrash, IconUpload } from "../Icons";
+import type { Accent, ConnectionConfig, MqttTopics, Settings } from "../../types";
+import { IconBell, IconImage, IconPlug, IconRefresh, IconSave, IconSettings, IconShield, IconTrash, IconUpload } from "../Icons";
 
 export function SettingsPanel() {
   const {
     t,
     settings,
     saveSettings,
+    connection,
+    saveConnectionConfig,
+    reconnectBackend,
     lang,
     setLang,
     notificationPermission,
@@ -22,20 +31,56 @@ export function SettingsPanel() {
   } = useApp();
   const { canInstall, installed } = useInstallPrompt();
   const [draft, setDraft] = useState<Settings>(settings);
+  const [connDraft, setConnDraft] = useState<ConnectionConfig>(connection);
   const [toast, setToast] = useState<string | null>(null);
+  const [toastErr, setToastErr] = useState(false);
   const [installOpen, setInstallOpen] = useState(false);
   const [iconBusy, setIconBusy] = useState(false);
   const [iconErr, setIconErr] = useState(false);
+  const [reconnecting, setReconnecting] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => setDraft(settings), [settings]);
+  useEffect(() => setConnDraft(connection), [connection]);
 
-  const notify = (msg: string) => {
+  const notify = (msg: string, err = false) => {
     setToast(msg);
+    setToastErr(err);
     window.setTimeout(() => setToast(null), 1800);
   };
 
   const patch = (p: Partial<Settings>) => setDraft((d) => ({ ...d, ...p }));
+  const patchConn = (p: Partial<ConnectionConfig>) => setConnDraft((d) => ({ ...d, ...p }));
+  const patchTopic = (k: keyof MqttTopics, v: string) =>
+    setConnDraft((d) => ({ ...d, topics: { ...d.topics, [k]: v } }));
+
+  const handleSaveConnection = () => {
+    saveConnectionConfig(connDraft);
+    notify(t("connectionSaved"));
+  };
+
+  const handleReconnect = () => {
+    saveConnectionConfig(connDraft); // ensure the new URL is active first
+    setReconnecting(true);
+    reconnectBackend();
+    notify(t("reconnectingBackend"));
+    window.setTimeout(() => setReconnecting(false), 1500);
+  };
+
+  // Active derived endpoints (read-only summary of the drafted backend URL).
+  const activeApi = deriveApiBase(connDraft.backendUrl);
+  const activeSocket = deriveSocketUrl(connDraft.backendUrl);
+
+  const topicFields: { k: keyof MqttTopics; label: string }[] = [
+    { k: "cmdArm", label: t("topicCmdArm") },
+    { k: "cmdDisarm", label: t("topicCmdDisarm") },
+    { k: "cmdSilence", label: t("topicCmdSilence") },
+    { k: "state", label: t("topicState") },
+    { k: "eventAlarm", label: t("topicEventAlarm") },
+    { k: "eventSensor", label: t("topicEventSensor") },
+    { k: "eventRfid", label: t("topicEventRfid") },
+    { k: "eventSystem", label: t("topicEventSystem") },
+  ];
 
   const handleIconUpload = async (file?: File | null) => {
     if (!file) return;
@@ -62,8 +107,77 @@ export function SettingsPanel() {
         <div className="mb-3 flex items-center justify-between">
           <ConnectionPill compact />
         </div>
-        <ReadonlyRow label={t("apiEndpoint")} value={API_BASE_URL} />
-        <ReadonlyRow label={t("socketEndpoint")} value={SOCKET_URL} />
+        <ReadonlyRow label={t("apiEndpoint")} value={activeApi} />
+        <ReadonlyRow label={t("socketEndpoint")} value={activeSocket} />
+      </Section>
+
+      {/* Connection settings (editable): backend + MQTT broker/topics */}
+      <Section title={t("connectionSettings")}>
+        {/* Backend URL */}
+        <Field label={t("backendUrl")}>
+          <input
+            className="cyber-input"
+            dir="ltr"
+            value={connDraft.backendUrl}
+            onChange={(e) => patchConn({ backendUrl: e.target.value })}
+            placeholder="https://your-backend.com"
+          />
+        </Field>
+        <p className="-mt-1 mb-3 font-tech text-[10px] leading-relaxed text-cyan-200/30">
+          {t("backendUrlHint")}
+        </p>
+
+        {/* MQTT broker (UI-only) */}
+        <div className="mb-2 flex items-center gap-2">
+          <IconPlug className="h-4 w-4 text-glow-pink" />
+          <h4 className="font-display text-xs font-bold uppercase text-glow-pink">{t("brokerConfig")}</h4>
+        </div>
+        <div className="grid grid-cols-1 gap-2.5">
+          <Field label={t("brokerUrl")}>
+            <input className="cyber-input !py-1.5 text-xs" dir="ltr" value={connDraft.brokerUrl} onChange={(e) => patchConn({ brokerUrl: e.target.value })} />
+          </Field>
+          <Field label={t("brokerPort")}>
+            <input className="cyber-input !py-1.5 text-xs" dir="ltr" inputMode="numeric" value={connDraft.brokerPort} onChange={(e) => patchConn({ brokerPort: e.target.value })} />
+          </Field>
+        </div>
+        <p className="mb-3 font-tech text-[10px] leading-relaxed text-cyan-200/30">{t("brokerHint")}</p>
+
+        {/* MQTT topics (UI-only) */}
+        <h4 className="mb-2 font-display text-xs font-bold uppercase text-glow-pink">{t("mqttTopics")}</h4>
+        <div className="space-y-2">
+          {topicFields.map((f) => (
+            <div key={f.k} className="flex items-center gap-2">
+              <span className="w-24 shrink-0 font-tech text-[10px] uppercase tracking-wider text-cyan-200/40">{f.label}</span>
+              <input className="cyber-input !py-1.5 text-xs" dir="ltr" value={connDraft.topics[f.k]} onChange={(e) => patchTopic(f.k, e.target.value)} />
+            </div>
+          ))}
+        </div>
+
+        {/* Save + Reconnect */}
+        <div className="mt-4 flex gap-2.5">
+          <button
+            type="button"
+            onClick={handleSaveConnection}
+            className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-neon-green/60 bg-neon-green/10 py-2.5 font-display text-xs font-bold uppercase text-glow-green shadow-glow-green transition active:scale-[0.98]"
+          >
+            <IconSave className="h-4 w-4" /> {t("save")}
+          </button>
+          <button
+            type="button"
+            onClick={handleReconnect}
+            disabled={reconnecting}
+            className="flex items-center justify-center gap-2 rounded-lg border border-neon-blue/50 bg-neon-blue/10 px-4 py-2.5 font-display text-xs font-bold uppercase text-glow-blue transition active:scale-[0.98] disabled:opacity-60"
+          >
+            <IconRefresh className={cn("h-4 w-4", reconnecting && "animate-spin")} /> {t("reconnectBackend")}
+          </button>
+        </div>
+        <button
+          type="button"
+          onClick={() => setConnDraft(defaultConnectionConfig())}
+          className="mt-2 w-full text-center font-tech text-[10px] uppercase text-cyan-200/30 transition hover:text-glow-yellow"
+        >
+          ↺ reset connection defaults
+        </button>
       </Section>
 
       {/* App icon */}
@@ -250,8 +364,13 @@ export function SettingsPanel() {
 
       {toast && (
         <div className="animate-rise fixed inset-x-0 bottom-24 z-50 flex justify-center px-4">
-          <div className="glass-strong rounded-full border border-neon-green/50 px-5 py-2 font-tech text-xs text-glow-green shadow-glow-green">
-            ✓ {toast}
+          <div
+            className={cn(
+              "glass-strong rounded-full border px-5 py-2 font-tech text-xs shadow-glow-green",
+              toastErr ? "border-neon-red/50 text-glow-red shadow-glow-red" : "border-neon-green/50 text-glow-green",
+            )}
+          >
+            {toastErr ? "⚠" : "✓"} {toast}
           </div>
         </div>
       )}
@@ -278,5 +397,14 @@ function ReadonlyRow({ label, value }: { label: string; value: string }) {
         {value}
       </div>
     </div>
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label className="block">
+      <span className="mb-1 block font-tech text-[10px] uppercase tracking-wider text-cyan-200/50">{label}</span>
+      {children}
+    </label>
   );
 }
