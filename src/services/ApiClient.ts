@@ -102,8 +102,8 @@ export const api = {
   /** GET /system/state → { securityState, deviceOnline, ... }. */
   getSystemState: () => request<Record<string, unknown>>("/system/state"),
 
-  /** POST /system/commands → { command: "arm" | "disarm" | "silence" }. */
-  sendCommand: (command: "arm" | "disarm" | "silence") =>
+  /** POST /system/commands → { command: "arm" | "disarm" | "silence" | "white" }. */
+  sendCommand: (command: "arm" | "disarm" | "silence" | "white") =>
     request<Record<string, unknown>>("/system/commands", {
       method: "POST",
       body: JSON.stringify({ command }),

@@ -6,7 +6,7 @@
 import type { Lang } from "./i18n/translations";
 
 /* ---- System level ---- */
-export type SystemState = "armed" | "disarmed" | "alarm" | "unknown";
+export type SystemState = "armed" | "disarmed" | "alarm" | "white" | "unknown";
 
 /* ---- Per-module severity ---- */
 export type Severity = "ok" | "warning" | "alarm" | "info";

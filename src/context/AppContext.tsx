@@ -95,6 +95,7 @@ function normalizeSeverity(sev?: string, event?: string): Severity {
 function normalizeSystemState(v?: unknown): SystemState {
   const s = String(v ?? "").toLowerCase();
   if (s.includes("disarm")) return "disarmed";
+  if (s.includes("white")) return "white"; // RFID-triggered "white mode"
   if (s.includes("alarm") || s.includes("trigger")) return "alarm";
   if (s.includes("arm")) return "armed";
   return "unknown";
@@ -254,8 +255,8 @@ interface AppContextValue {
   logs: LogEntry[];
   traces: TraceEntry[];
   traceStats: { tx: number; rx: number; bytes: number };
-  pendingCommand: "arm" | "disarm" | "silence" | null;
-  sendCommand: (cmd: "arm" | "disarm" | "silence") => Promise<void>;
+  pendingCommand: "arm" | "disarm" | "silence" | "white" | null;
+  sendCommand: (cmd: "arm" | "disarm" | "silence" | "white") => Promise<void>;
   // POST /system/modules/refresh — asks backend to push fresh module state.
   refreshingModules: boolean;
   refreshModules: () => Promise<boolean>;
@@ -291,7 +292,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [modulesMap, setModulesMap] = useState<Record<string, ModuleState>>(initialModules);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [traces, setTraces] = useState<TraceEntry[]>([]);
-  const [pendingCommand, setPendingCommand] = useState<"arm" | "disarm" | "silence" | null>(null);
+  const [pendingCommand, setPendingCommand] = useState<"arm" | "disarm" | "silence" | "white" | null>(null);
   const [refreshingModules, setRefreshingModules] = useState(false);
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | "unsupported">(
     typeof Notification !== "undefined" ? Notification.permission : "unsupported",
@@ -655,7 +656,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const sendCommand = useCallback(
-    async (cmd: "arm" | "disarm" | "silence") => {
+    async (cmd: "arm" | "disarm" | "silence" | "white") => {
       if (pendingRef.current) return;
       pendingRef.current = cmd;
       setPendingCommand(cmd);
@@ -663,9 +664,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       // Demo / preview path — simulate a backend confirmation locally.
       if (demoRef.current) {
         await new Promise((r) => setTimeout(r, 700));
+        const demoState =
+          cmd === "arm" ? "armed" : cmd === "white" ? "white" : "disarmed";
         setSystem((prev) => ({
           ...prev,
-          securityState: cmd === "arm" ? "armed" : "disarmed",
+          securityState: demoState,
           lastSync: Date.now(),
         }));
         pushTrace("sys", "CMD_CONFIRM", { detail: `demo ${cmd}` });

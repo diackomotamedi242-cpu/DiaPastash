@@ -13,6 +13,9 @@ function systemMeta(state: SystemState) {
       return { accent: "green" as const, labelKey: "armed" as const, Icon: IconShield };
     case "disarmed":
       return { accent: "blue" as const, labelKey: "disarmed" as const, Icon: IconShield };
+    case "white":
+      // RFID-triggered "white mode" — a calm milky-white neon state (no pulse).
+      return { accent: "white" as const, labelKey: "whiteMode" as const, Icon: IconShield };
     case "alarm":
       return { accent: "red" as const, labelKey: "alarm" as const, Icon: IconBolt, pulse: true };
     default:
@@ -25,6 +28,56 @@ const ACCENT_MAP = {
   blue: { border: "border-neon-blue", glow: "shadow-glow-blue", text: "text-glow-blue", hex: "#00FFFF" },
   red: { border: "border-neon-red", glow: "shadow-glow-red", text: "text-glow-red", hex: "#FF003C" },
   yellow: { border: "border-neon-yellow", glow: "shadow-glow-yellow", text: "text-glow-yellow", hex: "#FFFF00" },
+  white: { border: "border-neon-white", glow: "shadow-glow-white", text: "text-glow-white", hex: "#F8F8FF" },
+};
+
+/**
+ * Inline-style theme for the central System Status indicator.
+ * Using inline styles (instead of utility classes) GUARANTEES the milky-white
+ * "white mode" styling always renders — color, text-shadow, box-shadow and
+ * border all update together. The other states use the same neon values they
+ * used before, so armed/disarmed/alarm look identical.
+ */
+const STATE_THEME: Record<
+  string,
+  { color: string; border: string; shadow: string; textShadow: string; glow: string }
+> = {
+  green: {
+    color: "#39FF14",
+    border: "rgba(57,255,20,0.6)",
+    shadow: "0 0 8px rgba(57,255,20,0.5), 0 0 22px rgba(57,255,20,0.25), inset 0 0 12px rgba(57,255,20,0.08)",
+    textShadow: "0 0 4px rgba(57,255,20,0.9), 0 0 14px rgba(57,255,20,0.45)",
+    glow: "57,255,20",
+  },
+  blue: {
+    color: "#00FFFF",
+    border: "rgba(0,255,255,0.6)",
+    shadow: "0 0 8px rgba(0,255,255,0.5), 0 0 22px rgba(0,255,255,0.25), inset 0 0 12px rgba(0,255,255,0.08)",
+    textShadow: "0 0 4px rgba(0,255,255,0.9), 0 0 14px rgba(0,255,255,0.45)",
+    glow: "0,255,255",
+  },
+  red: {
+    color: "#FF003C",
+    border: "rgba(255,0,60,0.65)",
+    shadow: "0 0 8px rgba(255,0,60,0.6), 0 0 24px rgba(255,0,60,0.3), inset 0 0 12px rgba(255,0,60,0.1)",
+    textShadow: "0 0 4px rgba(255,0,60,0.9), 0 0 14px rgba(255,0,60,0.5)",
+    glow: "255,0,60",
+  },
+  yellow: {
+    color: "#FFFF00",
+    border: "rgba(255,255,0,0.6)",
+    shadow: "0 0 8px rgba(255,255,0,0.5), 0 0 22px rgba(255,255,0,0.25), inset 0 0 12px rgba(255,255,0,0.08)",
+    textShadow: "0 0 4px rgba(255,255,0,0.9), 0 0 14px rgba(255,255,0,0.45)",
+    glow: "255,255,0",
+  },
+  white: {
+    // Milky-white neon (AliceWhite-ish) for RFID-triggered White Mode.
+    color: "#F8F8FF",
+    border: "#F8F8FF",
+    shadow: "0 0 10px #F8F8FF, 0 0 24px rgba(224,224,240,0.35), inset 0 0 14px rgba(255,255,255,0.12)",
+    textShadow: "0 0 10px #F8F8FF, 0 0 20px #F8F8FF",
+    glow: "248,248,255",
+  },
 };
 
 export function HomePanel() {
@@ -33,14 +86,14 @@ export function HomePanel() {
   const [toast, setToast] = useState<string | null>(null);
 
   const meta = systemMeta(system.securityState);
-  const accent = ACCENT_MAP[meta.accent];
+  const theme = STATE_THEME[meta.accent] ?? STATE_THEME.yellow;
   const pulse = "pulse" in meta && meta.pulse;
 
   const activeCount = modules.filter((m) => m.updatedAt).length;
   const triggeredCount = modules.filter((m) => m.severity === "alarm").length;
   const last = logs[0];
 
-  const fire = async (cmd: "arm" | "disarm" | "silence") => {
+  const fire = async (cmd: "arm" | "disarm" | "silence" | "white") => {
     await sendCommand(cmd);
     setToast(t("commandSent"));
     window.setTimeout(() => setToast(null), 1800);
@@ -66,27 +119,37 @@ export function HomePanel() {
         )}
       </div>
 
-      {/* System state HUD */}
+      {/* System state HUD — inline-styled so every state (incl. white) renders reliably */}
       <div
         className={cn(
           "glass clip-hud relative mb-3 overflow-hidden rounded-2xl border p-5 text-center",
-          accent.border,
-          accent.glow,
           pulse && "animate-pulse-glow",
         )}
+        style={{ borderColor: theme.border, boxShadow: theme.shadow }}
       >
         <div
           className="pointer-events-none absolute inset-x-0 -top-10 h-24 blur-3xl"
-          style={{ background: `${accent.hex}22` }}
+          style={{ background: `rgba(${theme.glow},0.16)` }}
         />
         <p className="relative font-tech text-[10px] uppercase tracking-[0.3em] text-cyan-200/50">
           {t("systemStatus")}
         </p>
         <div className="relative mt-3 flex flex-col items-center">
-          <div className={cn("flex h-16 w-16 items-center justify-center rounded-full border bg-black/50", accent.border)}>
-            <meta.Icon className={cn("h-8 w-8", accent.text, pulse && "animate-pulse-glow")} />
+          <div
+            className="flex h-16 w-16 items-center justify-center rounded-full border bg-black/50"
+            style={{ borderColor: theme.border }}
+          >
+            <meta.Icon
+              className={cn("h-8 w-8", pulse && "animate-pulse-glow")}
+              style={{ color: theme.color, textShadow: theme.textShadow }}
+            />
           </div>
-          <div className={cn("mt-3 font-display text-3xl font-extrabold", accent.text)}>{t(meta.labelKey)}</div>
+          <div
+            className="mt-3 font-display text-3xl font-extrabold"
+            style={{ color: theme.color, textShadow: theme.textShadow }}
+          >
+            {t(meta.labelKey)}
+          </div>
         </div>
       </div>
 
@@ -117,15 +180,23 @@ export function HomePanel() {
             disabled={!!pendingCommand}
           />
           <CmdButton
-            onClick={() => fire("silence")}
-            label={pendingCommand === "silence" ? t("sending") : t("silence")}
-            desc={t("silenceDesc")}
-            color="red"
-            Icon={IconBolt}
+            onClick={() => fire("white")}
+            label={pendingCommand === "white" ? t("sending") : t("whiteMode")}
+            desc={t("whiteDesc")}
+            color="white"
+            Icon={IconShield}
             compact
             disabled={!!pendingCommand}
           />
         </div>
+        <CmdButton
+          onClick={() => fire("silence")}
+          label={pendingCommand === "silence" ? t("sending") : t("silence")}
+          desc={t("silenceDesc")}
+          color="red"
+          Icon={IconBolt}
+          disabled={!!pendingCommand}
+        />
       </div>
 
       {/* Quick stats */}
@@ -199,7 +270,7 @@ function CmdButton({
   onClick: () => void;
   label: string;
   desc: string;
-  color: "green" | "blue" | "red";
+  color: "green" | "blue" | "red" | "white";
   Icon: (p: { className?: string }) => React.ReactElement;
   compact?: boolean;
   disabled?: boolean;

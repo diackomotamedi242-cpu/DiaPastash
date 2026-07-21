@@ -163,6 +163,8 @@ body {
   .text-glow-red { color: var(--color-neon-red); text-shadow: 0 0 4px rgba(255, 0, 60, 0.9), 0 0 14px rgba(255, 0, 60, 0.5); }
   .text-glow-pink { color: var(--color-neon-pink); text-shadow: 0 0 4px rgba(255, 0, 255, 0.9), 0 0 14px rgba(255, 0, 255, 0.45); }
   .text-glow-yellow { color: var(--color-neon-yellow); text-shadow: 0 0 4px rgba(255, 255, 0, 0.9), 0 0 14px rgba(255, 255, 0, 0.45); }
+  /* Milky-white neon (for the RFID-triggered "white mode" state). */
+  .text-glow-white { color: #f8f8ff; text-shadow: 0 0 4px rgba(248, 248, 255, 0.95), 0 0 16px rgba(224, 224, 240, 0.65), 0 0 30px rgba(224, 224, 240, 0.35); }
   .text-glow-soft { text-shadow: 0 0 8px rgba(0, 255, 255, 0.35); }
 
   .shadow-glow-green { box-shadow: 0 0 8px rgba(57, 255, 20, 0.5), 0 0 22px rgba(57, 255, 20, 0.25), inset 0 0 12px rgba(57, 255, 20, 0.08); }
@@ -170,12 +172,14 @@ body {
   .shadow-glow-red { box-shadow: 0 0 8px rgba(255, 0, 60, 0.6), 0 0 24px rgba(255, 0, 60, 0.3), inset 0 0 12px rgba(255, 0, 60, 0.1); }
   .shadow-glow-pink { box-shadow: 0 0 8px rgba(255, 0, 255, 0.5), 0 0 22px rgba(255, 0, 255, 0.25), inset 0 0 12px rgba(255, 0, 255, 0.08); }
   .shadow-glow-yellow { box-shadow: 0 0 8px rgba(255, 255, 0, 0.5), 0 0 22px rgba(255, 255, 0, 0.25), inset 0 0 12px rgba(255, 255, 0, 0.08); }
+  .shadow-glow-white { box-shadow: 0 0 8px rgba(248, 248, 255, 0.6), 0 0 24px rgba(224, 224, 240, 0.35), inset 0 0 14px rgba(255, 255, 255, 0.12); }
 
   .border-neon-green { border-color: rgba(57, 255, 20, 0.6) !important; }
   .border-neon-blue { border-color: rgba(0, 255, 255, 0.6) !important; }
   .border-neon-red { border-color: rgba(255, 0, 60, 0.65) !important; }
   .border-neon-pink { border-color: rgba(255, 0, 255, 0.6) !important; }
   .border-neon-yellow { border-color: rgba(255, 255, 0, 0.6) !important; }
+  .border-neon-white { border-color: #f8f8ff !important; }
 
   .font-tech { font-family: var(--font-tech); }
   .font-display { font-family: var(--font-display); }
